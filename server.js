@@ -31,6 +31,7 @@ async function fetchShiprocketToken() {
     const data = await res.json();
     shiprocketToken = "Bearer " + data.token;
     console.log("✅ Shiprocket token fetched");
+    console.log("Token:", shiprocketToken);
   } catch (err) {
     console.error("❌ Shiprocket token error:", err.message);
   }
@@ -74,8 +75,6 @@ function getUpcomingMondayDateTime() {
 
 
 
-
-
 app.post('/webhooks/orders_create', async (req, res) => {
   console.log('✅ New Shopify Order Received');
 
@@ -115,7 +114,7 @@ app.post('/webhooks/orders_create', async (req, res) => {
   const payload = {
     order_id: order.id.toString(),
     order_date: order.created_at,
-    pickup_location: "Rebba",
+    pickup_location: "Home-1",
     channel_id: "",
     comment: `Delivery on ${deliveryDate} (${deliveryDay}) at ${deliveryTime} [${customerTimeZone}]`,
     billing_customer_name: order.billing_address?.first_name || "Unknown",
@@ -170,7 +169,7 @@ app.post('/webhooks/orders_create', async (req, res) => {
     }
 
     storePendingOrder(data.shipment_id, { order_id: order.id });
-    console.log("📦 Stored for Saturday scheduling");
+    console.log("📦 Stored for Sunday scheduling");
     res.status(200).send("Order received and scheduled");
   } catch (error) {
     console.error("❌ Shiprocket order error:", error.message);
@@ -179,8 +178,8 @@ app.post('/webhooks/orders_create', async (req, res) => {
 });
 
 
-cron.schedule('32 15 * * 0', async () => {
-  console.log("⏰ Saturday Cron: Assign AWB");
+cron.schedule('0 9 * * 0', async () => {
+  console.log("⏰ Sunday Cron: Assign AWB");
 
   if (!fs.existsSync(JSON_FILE)) return;
 
