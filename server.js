@@ -7,7 +7,7 @@ const path = require('path');
 const cron = require('node-cron');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
 const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
