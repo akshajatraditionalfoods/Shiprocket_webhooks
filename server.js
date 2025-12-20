@@ -21,7 +21,11 @@ async function fetchShiprocketToken() {
   try {
     const res = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+       },
       body: JSON.stringify({
         email: SHIPROCKET_EMAIL,
         password: SHIPROCKET_PASSWORD
@@ -186,6 +190,8 @@ app.post('/webhooks/orders_create', async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Authorization": shiprocketToken
       },
       body: JSON.stringify(payload)
@@ -225,6 +231,8 @@ cron.schedule('0 00 2 * * 0', async () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Authorization": shiprocketToken
         },
         body: JSON.stringify({
