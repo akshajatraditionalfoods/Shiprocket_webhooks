@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const fetch = require('node-fetch');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
@@ -9,215 +9,230 @@ const cron = require('node-cron');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
-const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+/* ================== ENV ================== */
+const {
+  SHIPROCKET_EMAIL,
+  SHIPROCKET_PASSWORD,
+  GOOGLE_MAPS_API_KEY,
+  SHOPIFY_WEBHOOK_SECRET
+} = process.env;
 
+/* ================== STORAGE ================== */
 const JSON_FILE = path.join(__dirname, 'pending-orders.json');
 let shiprocketToken = "";
 
-// 🔐 Fetch Shiprocket Token
-async function fetchShiprocketToken() {
-  try {
-    const res = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: SHIPROCKET_EMAIL,
-        password: SHIPROCKET_PASSWORD
-      })
-    });
-
-    const data = await res.json();
-    shiprocketToken = "Bearer " + data.token;
-    console.log("✅ Shiprocket token fetched");
-    console.log("Token:", shiprocketToken);
-  } catch (err) {
-    console.error("❌ Shiprocket token error:", err.message);
-  }
-}
-
-// Fetch token at startup
-fetchShiprocketToken();
-
+/* ================== MIDDLEWARE ================== */
+// Raw body ONLY for Shopify webhook
+app.use('/webhooks/orders_create', bodyParser.raw({ type: 'application/json' }));
+// JSON for everything else
 app.use(bodyParser.json());
 
-app.get('/order', (req, res) => {
-  res.send("📦 Order API is live");
-});
+/* ================== HELPERS ================== */
 
-// Store shipment ID locally
-function storePendingOrder(shipment_id, orderInfo) {
-  let orders = [];
-  if (fs.existsSync(JSON_FILE)) {
-    orders = JSON.parse(fs.readFileSync(JSON_FILE));
+// 🔐 Shopify HMAC Verification
+function verifyShopifyHmac(req) {
+  const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+  if (!hmacHeader) return false;
+
+  const digest = crypto
+    .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+    .update(req.body)
+    .digest('base64');
+
+  return crypto.timingSafeEqual(
+    Buffer.from(digest),
+    Buffer.from(hmacHeader)
+  );
+}
+
+// 🔐 Shiprocket Token Fetch
+async function fetchShiprocketToken() {
+  const res = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: SHIPROCKET_EMAIL,
+      password: SHIPROCKET_PASSWORD
+    })
+  });
+
+  const data = await res.json();
+  if (!data.token) throw new Error("Shiprocket auth failed");
+
+  shiprocketToken = `Bearer ${data.token}`;
+  console.log("✅ Shiprocket token refreshed");
+}
+
+async function getShiprocketAuth() {
+  if (!shiprocketToken) {
+    await fetchShiprocketToken();
   }
+  return shiprocketToken;
+}
+
+// 📦 Local persistence (TEMP – replace with DB in prod)
+function storePendingOrder(shipment_id, order_id) {
+  const orders = fs.existsSync(JSON_FILE)
+    ? JSON.parse(fs.readFileSync(JSON_FILE))
+    : [];
+
   orders.push({
     shipment_id,
-    order_id: orderInfo.order_id,
+    order_id,
     created_at: new Date().toISOString()
   });
+
   fs.writeFileSync(JSON_FILE, JSON.stringify(orders, null, 2));
 }
 
-
+// 📅 Next Monday 4AM
 function getUpcomingMondayDateTime() {
   const now = new Date();
   const monday = new Date();
-  
-
-  const daysUntilMonday = (1 - now.getDay() + 7) % 7 || 7;
-  monday.setDate(now.getDate() + daysUntilMonday);
-  monday.setHours(4, 0, 0, 0);  
-  
+  const days = (1 - now.getDay() + 7) % 7 || 7;
+  monday.setDate(now.getDate() + days);
+  monday.setHours(4, 0, 0, 0);
   return monday.toISOString().slice(0, 19).replace('T', ' ');
 }
 
+/* ================== ROUTES ================== */
 
-
-app.post('/webhooks/orders_create', async (req, res) => {
-  console.log('✅ New Shopify Order Received');
-
-  const order = req.body;
-
-  const deliveryInfo = {};
-  if (Array.isArray(order.note_attributes)) {
-    order.note_attributes.forEach(attr => {
-      deliveryInfo[attr.name] = attr.value;
-    });
-  }
-
-  const deliveryDate = deliveryInfo["Delivery Date"] || "";
-  const deliveryTime = deliveryInfo["Delivery Time"] || "";
-  const deliveryDay = deliveryInfo["Delivery Day"] || "";
-  const customerTimeZone = deliveryInfo["Customer TimeZone"] || "Asia/Calcutta";
-
-  const zip = order.billing_address?.zip || "";
-  let latitude = "0.0";
-  let longitude = "0.0";
-
-  try {
-    const geoRes = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${zip}&key=${GOOGLE_MAPS_API_KEY}`);
-    const geoData = await geoRes.json();
-
-    if (geoData.status === "OK" && geoData.results.length > 0) {
-      latitude = geoData.results[0].geometry.location.lat.toString();
-      longitude = geoData.results[0].geometry.location.lng.toString();
-      console.log(`📍 ZIP ${zip} → lat: ${latitude}, lng: ${longitude}`);
-    } else {
-      console.warn("⚠️ Could not fetch coordinates");
-    }
-  } catch (err) {
-    console.error("🌐 Geocoding error:", err.message);
-  }
-
-  const payload = {
-    order_id: order.id.toString(),
-    order_date: order.created_at,
-    pickup_location: "Home-1",
-    channel_id: "",
-    comment: `Delivery on ${deliveryDate} (${deliveryDay}) at ${deliveryTime} [${customerTimeZone}]`,
-    billing_customer_name: order.billing_address?.first_name || "Unknown",
-    billing_last_name: order.billing_address?.last_name || "",
-    billing_address: order.billing_address?.address1 || "",
-    billing_address_2: order.billing_address?.address2 || "",
-    billing_city: order.billing_address?.city || "",
-    billing_pincode: order.billing_address?.zip || "",
-    billing_state: order.billing_address?.province || "",
-    billing_country: order.billing_address?.country || "",
-    billing_email: order.email || "",
-    billing_phone: order.customer?.phone || "7672499601",
-    shipping_is_billing: true,
-    order_items: order.line_items.map(item => ({
-      name: item.name,
-      sku: item.sku || "defaultsku",
-      units: item.quantity,
-      selling_price: item.price,
-      hsn: 441122,
-      category_name: "Food"
-    })),
-    payment_method: order.financial_status === "paid" ? "Prepaid" : "COD",
-    shipping_charges: 0,
-    giftwrap_charges: 0,
-    transaction_charges: 0,
-    total_discount: 0,
-    sub_total: order.subtotal_price || 0,
-    length: 10,
-    breadth: 15,
-    height: 20,
-    weight: 2.5,
-    shipping_method: "HL",
-    latitude,
-    longitude
-  };
-
-  try {
-    const response = await fetch("https://apiv2.shiprocket.in/v1/external/orders/create/adhoc", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": shiprocketToken
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await response.json();
-    console.log("🚚 Shiprocket Order Response:", data);
-
-    if (!data.shipment_id) {
-      throw new Error("❌ Shipment ID not returned from Shiprocket");
-    }
-
-    storePendingOrder(data.shipment_id, { order_id: order.id });
-    console.log("📦 Stored for Sunday scheduling");
-    res.status(200).send("Order received and scheduled");
-  } catch (error) {
-    console.error("❌ Shiprocket order error:", error.message);
-    res.status(500).send("Shiprocket order failed");
-  }
+app.get('/order', (_, res) => {
+  res.send("📦 Order API is live");
 });
 
+/* ================== SHOPIFY WEBHOOK ================== */
 
-cron.schedule('0 9 * * 0', async () => {
-  console.log("⏰ Sunday Cron: Assign AWB");
+app.post('/webhooks/orders_create', async (req, res) => {
+  // 🔒 Verify HMAC
+  if (!verifyShopifyHmac(req)) {
+    console.error("❌ Invalid Shopify HMAC");
+    return res.status(401).send("Unauthorized");
+  }
 
-  if (!fs.existsSync(JSON_FILE)) return;
+  // Respond immediately (Shopify requirement)
+  res.status(200).send("Webhook received");
 
-  const orders = JSON.parse(fs.readFileSync(JSON_FILE));
-  const remainingOrders = [];
+  const order = JSON.parse(req.body.toString());
+  console.log(`✅ Order received: ${order.id}`);
 
-  for (const order of orders) {
-    try {
-      const res = await fetch("https://apiv2.shiprocket.in/v1/external/courier/assign/awb", {
+  try {
+    const deliveryInfo = {};
+    (order.note_attributes || []).forEach(a => deliveryInfo[a.name] = a.value);
+
+    const zip = order.billing_address?.zip || "";
+    let latitude = "0.0";
+    let longitude = "0.0";
+
+    if (zip) {
+      const geoRes = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${zip}&key=${GOOGLE_MAPS_API_KEY}`
+      );
+      const geo = await geoRes.json();
+      if (geo.status === "OK") {
+        latitude = geo.results[0].geometry.location.lat.toString();
+        longitude = geo.results[0].geometry.location.lng.toString();
+      }
+    }
+
+    const payload = {
+      order_id: String(order.id),
+      order_date: order.created_at,
+      pickup_location: "Home-1",
+      billing_customer_name: order.billing_address?.first_name || "Customer",
+      billing_last_name: order.billing_address?.last_name || "",
+      billing_address: order.billing_address?.address1 || "",
+      billing_city: order.billing_address?.city || "",
+      billing_pincode: order.billing_address?.zip || "",
+      billing_state: order.billing_address?.province || "",
+      billing_country: order.billing_address?.country || "",
+      billing_email: order.email,
+      billing_phone:
+        order.customer?.phone ||
+        order.billing_address?.phone ||
+        "9999999999",
+      shipping_is_billing: true,
+      order_items: order.line_items.map(i => ({
+        name: i.name,
+        sku: i.sku || "SKU",
+        units: i.quantity,
+        selling_price: i.price,
+        hsn: 441122,
+        category_name: "Food"
+      })),
+      payment_method: order.financial_status === "paid" ? "Prepaid" : "COD",
+      sub_total: order.subtotal_price || 0,
+      length: 10,
+      breadth: 15,
+      height: 20,
+      weight: 2.5,
+      latitude,
+      longitude
+    };
+
+    const shiprocketRes = await fetch(
+      "https://apiv2.shiprocket.in/v1/external/orders/create/adhoc",
+      {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": shiprocketToken
+          "Authorization": await getShiprocketAuth()
         },
-        body: JSON.stringify({
-          shipment_id: order.shipment_id,
-          future_pickup_scheduled: getUpcomingMondayDateTime(),
-          courier_id: "",
-          vehicle_type: 2
-        })
-      });
-
-      const result = await res.json();
-
-      if (res.ok && result.awb_code) {
-        console.log(`✅ AWB Assigned: ${result.awb_code} for shipment ${order.shipment_id}`);
-      } else {
-        console.warn(`⚠️ Failed for ${order.shipment_id}:`, result);
-        remainingOrders.push(order);
+        body: JSON.stringify(payload)
       }
-    } catch (err) {
-      console.error(`❌ Error for ${order.shipment_id}:`, err.message);
-      remainingOrders.push(order);
+    );
+
+    const result = await shiprocketRes.json();
+    if (!result.shipment_id) throw new Error("Shipment ID missing");
+
+    storePendingOrder(result.shipment_id, order.id);
+    console.log(`📦 Stored shipment ${result.shipment_id}`);
+
+  } catch (err) {
+    console.error("❌ Webhook processing error:", err.message);
+  }
+});
+
+/* ================== CRON (SUNDAY) ================== */
+
+cron.schedule('0 9 * * 0', async () => {
+  console.log("⏰ Sunday Cron Started");
+
+  if (!fs.existsSync(JSON_FILE)) return;
+  const orders = JSON.parse(fs.readFileSync(JSON_FILE));
+  const remaining = [];
+
+  for (const o of orders) {
+    try {
+      const res = await fetch(
+        "https://apiv2.shiprocket.in/v1/external/courier/assign/awb",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": await getShiprocketAuth()
+          },
+          body: JSON.stringify({
+            shipment_id: o.shipment_id,
+            future_pickup_scheduled: getUpcomingMondayDateTime(),
+            vehicle_type: 2
+          })
+        }
+      );
+
+      const data = await res.json();
+      if (!data.awb_code) throw new Error("AWB failed");
+
+      console.log(`✅ AWB Assigned: ${data.awb_code}`);
+    } catch {
+      remaining.push(o);
     }
   }
 
-  fs.writeFileSync(JSON_FILE, JSON.stringify(remainingOrders, null, 2));
+  fs.writeFileSync(JSON_FILE, JSON.stringify(remaining, null, 2));
 });
+
+/* ================== START ================== */
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);

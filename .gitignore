@@ -4,6 +4,9 @@ node_modules/
 # Environment variables
 .env
 
+# pending ordera file
+pending-orders.json
+
 # Log files
 npm-debug.log*
 yarn-debug.log*
