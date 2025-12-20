@@ -17,7 +17,6 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const JSON_FILE = path.join(__dirname, 'pending-orders.json');
 let shiprocketToken = "";
 
-// 🔐 Fetch Shiprocket Token
 async function fetchShiprocketToken() {
   try {
     const res = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
@@ -29,7 +28,10 @@ async function fetchShiprocketToken() {
       })
     });
 
-    const data = await res.json();
+    const text = await res.text(); // first read as text
+    console.log("Raw Shiprocket Response:", text);
+
+    const data = JSON.parse(text); // then parse
     shiprocketToken = "Bearer " + data.token;
     console.log("✅ Shiprocket token fetched");
     console.log("Token:", shiprocketToken);
@@ -38,12 +40,10 @@ async function fetchShiprocketToken() {
   }
 }
 
-// Fetch token at startup
 fetchShiprocketToken();
 
-// Middleware: raw body for HMAC verification
 app.use('/webhooks/orders_create', bodyParser.raw({ type: 'application/json' }));
-// JSON for other routes
+
 app.use(bodyParser.json());
 
 app.get('/order', (req, res) => {
@@ -171,6 +171,17 @@ app.post('/webhooks/orders_create', async (req, res) => {
   };
 
   try {
+    // const response = await fetch("https://apiv2.shiprocket.in/v1/external/orders/create/adhoc", {
+    //   method: "POST",
+    //   headers: {
+    //     "Content-Type": "application/json",
+    //     "Authorization": shiprocketToken
+    //   },
+    //   body: JSON.stringify(payload)
+    // });
+
+    // const data = await response.json();
+    // console.log("🚚 Shiprocket Order Response:", data);
     const response = await fetch("https://apiv2.shiprocket.in/v1/external/orders/create/adhoc", {
       method: "POST",
       headers: {
@@ -180,8 +191,11 @@ app.post('/webhooks/orders_create', async (req, res) => {
       body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
-    console.log("🚚 Shiprocket Order Response:", data);
+    const text = await response.text();
+    console.log("Raw Shiprocket Order Response:", text);
+
+    const data = JSON.parse(text);
+
 
     if (!data.shipment_id) {
       throw new Error("❌ Shipment ID not returned from Shiprocket");
