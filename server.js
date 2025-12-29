@@ -32,15 +32,15 @@ async function fetchShiprocketToken() {
       })
     });
 
-    const text = await res.text(); // first read as text
+    const text = await res.text(); 
     console.log("Raw Shiprocket Response:", text);
 
-    const data = JSON.parse(text); // then parse
+    const data = JSON.parse(text); 
     shiprocketToken = "Bearer " + data.token;
-    console.log("✅ Shiprocket token fetched");
+    console.log(" Shiprocket token fetched");
     console.log("Token:", shiprocketToken);
   } catch (err) {
-    console.error("❌ Shiprocket token error:", err.message);
+    console.error(" Shiprocket token error:", err.message);
   }
 }
 
@@ -54,7 +54,7 @@ app.get('/order', (req, res) => {
   res.send("📦 Order API is live");
 });
 
-// Store shipment ID locally
+
 function storePendingOrder(shipment_id, orderInfo) {
   let orders = [];
   if (fs.existsSync(JSON_FILE)) {
@@ -90,6 +90,11 @@ function verifyShopifyHmac(req) {
     .digest('base64');
 
   return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
+}
+
+async function getOutgoingIP() {
+  const response = await axios.get('https://api.ipify.org?format=json');
+  return response.data.ip;
 }
 
 app.post('/webhooks/orders_create', async (req, res) => {
@@ -204,14 +209,14 @@ app.post('/webhooks/orders_create', async (req, res) => {
 
 
     if (!data.shipment_id) {
-      throw new Error("❌ Shipment ID not returned from Shiprocket");
+      throw new Error("Shipment ID not returned from Shiprocket");
     }
 
     storePendingOrder(data.shipment_id, { order_id: order.id });
-    console.log("📦 Stored for Sunday scheduling");
+    console.log(" Stored for Sunday scheduling");
     res.status(200).send("Order received and scheduled");
   } catch (error) {
-    console.error("❌ Shiprocket order error:", error.message);
+    console.error("Shiprocket order error:", error.message);
     res.status(500).send("Shiprocket order failed");
   }
 });
@@ -258,6 +263,15 @@ cron.schedule('0 00 2 * * 0', async () => {
   }
 
   fs.writeFileSync(JSON_FILE, JSON.stringify(remainingOrders, null, 2));
+});
+
+app.get('/debug-ip', async (req, res) => {
+  try {
+    const ip = await getOutgoingIP();
+    res.json({ outgoing_ip: ip });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
