@@ -5,7 +5,6 @@ const crypto = require('crypto'); // Added for HMAC verification
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
-const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -91,11 +90,6 @@ function verifyShopifyHmac(req) {
     .digest('base64');
 
   return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
-}
-
-async function getOutgoingIP() {
-  const response = await axios.get('https://api.ipify.org?format=json');
-  return response.data.ip;
 }
 
 app.post('/webhooks/orders_create', async (req, res) => {
@@ -266,14 +260,34 @@ cron.schedule('0 00 2 * * 0', async () => {
   fs.writeFileSync(JSON_FILE, JSON.stringify(remainingOrders, null, 2));
 });
 
-app.get('/debug-ip', async (req, res) => {
-  try {
-    const ip = await getOutgoingIP();
-    res.json({ outgoing_ip: ip });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+const https = require('https');
+
+app.get('/my-ip', (req, res) => {
+  https.get('https://api.ipify.org?format=json', (response) => {
+    let data = '';
+
+    // A chunk of data has been received.
+    response.on('data', (chunk) => {
+      data += chunk;
+    });
+
+    // The whole response has been received.
+    response.on('end', () => {
+      try {
+        const json = JSON.parse(data);
+        console.log("📡 Server Public IP:", json.ip);
+        res.json({ ip: json.ip });
+      } catch (err) {
+        console.error("Error parsing IP response:", err.message);
+        res.status(500).send("Failed to parse IP");
+      }
+    });
+  }).on("error", (err) => {
+    console.error("Error fetching IP:", err.message);
+    res.status(500).send("Failed to get IP");
+  });
 });
+
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
