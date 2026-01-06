@@ -1,43 +1,52 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const fetch = require('node-fetch');
+const crypto = require('crypto'); 
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
 const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
 const JSON_FILE = path.join(__dirname, 'pending-orders.json');
 let shiprocketToken = "";
 
-// 🔐 Fetch Shiprocket Token
 async function fetchShiprocketToken() {
   try {
     const res = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+       },
       body: JSON.stringify({
         email: SHIPROCKET_EMAIL,
         password: SHIPROCKET_PASSWORD
       })
     });
 
-    const data = await res.json();
+    const text = await res.text(); 
+    console.log("Raw Shiprocket Response:", text);
+
+    const data = JSON.parse(text); 
     shiprocketToken = "Bearer " + data.token;
-    console.log("✅ Shiprocket token fetched");
+    console.log(" Shiprocket token fetched");
+    console.log("Token:", shiprocketToken);
   } catch (err) {
-    console.error("❌ Shiprocket token error:", err.message);
+    console.error(" Shiprocket token error:", err.message);
   }
 }
 
-// Fetch token at startup
 fetchShiprocketToken();
+
+app.use('/webhooks/orders_create', bodyParser.raw({ type: 'application/json' }));
 
 app.use(bodyParser.json());
 
@@ -45,7 +54,7 @@ app.get('/order', (req, res) => {
   res.send("📦 Order API is live");
 });
 
-// Store shipment ID locally
+
 function storePendingOrder(shipment_id, orderInfo) {
   let orders = [];
   if (fs.existsSync(JSON_FILE)) {
@@ -59,27 +68,40 @@ function storePendingOrder(shipment_id, orderInfo) {
   fs.writeFileSync(JSON_FILE, JSON.stringify(orders, null, 2));
 }
 
-
 function getUpcomingMondayDateTime() {
   const now = new Date();
   const monday = new Date();
-  
 
   const daysUntilMonday = (1 - now.getDay() + 7) % 7 || 7;
   monday.setDate(now.getDate() + daysUntilMonday);
   monday.setHours(4, 0, 0, 0);  
-  
+
   return monday.toISOString().slice(0, 19).replace('T', ' ');
 }
 
+// Shopify HMAC Verification
+function verifyShopifyHmac(req) {
+  const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+  if (!hmacHeader) return false;
 
+  const digest = crypto
+    .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+    .update(req.body)
+    .digest('base64');
 
-
+  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
+}
 
 app.post('/webhooks/orders_create', async (req, res) => {
+  // 🔒 Verify HMAC
+  if (!verifyShopifyHmac(req)) {
+    console.error("❌ Invalid Shopify HMAC");
+    return res.status(401).send("Unauthorized");
+  }
+
   console.log('✅ New Shopify Order Received');
 
-  const order = req.body;
+  const order = JSON.parse(req.body.toString()); // parse raw body
 
   const deliveryInfo = {};
   if (Array.isArray(order.note_attributes)) {
@@ -115,7 +137,7 @@ app.post('/webhooks/orders_create', async (req, res) => {
   const payload = {
     order_id: order.id.toString(),
     order_date: order.created_at,
-    pickup_location: "Rebba",
+    pickup_location: "Home-1",
     channel_id: "",
     comment: `Delivery on ${deliveryDate} (${deliveryDay}) at ${deliveryTime} [${customerTimeZone}]`,
     billing_customer_name: order.billing_address?.first_name || "Unknown",
@@ -153,34 +175,50 @@ app.post('/webhooks/orders_create', async (req, res) => {
   };
 
   try {
+    // const response = await fetch("https://apiv2.shiprocket.in/v1/external/orders/create/adhoc", {
+    //   method: "POST",
+    //   headers: {
+    //     "Content-Type": "application/json",
+    //     "Authorization": shiprocketToken
+    //   },
+    //   body: JSON.stringify(payload)
+    // });
+
+    // const data = await response.json();
+    // console.log("🚚 Shiprocket Order Response:", data);
     const response = await fetch("https://apiv2.shiprocket.in/v1/external/orders/create/adhoc", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Authorization": shiprocketToken
       },
       body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
-    console.log("🚚 Shiprocket Order Response:", data);
+    const text = await response.text();
+    console.log("Raw Shiprocket Order Response:", text);
+
+    const data = JSON.parse(text);
+
 
     if (!data.shipment_id) {
-      throw new Error("❌ Shipment ID not returned from Shiprocket");
+      throw new Error("Shipment ID not returned from Shiprocket");
     }
 
     storePendingOrder(data.shipment_id, { order_id: order.id });
-    console.log("📦 Stored for Saturday scheduling");
+    console.log(" Stored for Sunday scheduling");
     res.status(200).send("Order received and scheduled");
   } catch (error) {
-    console.error("❌ Shiprocket order error:", error.message);
+    console.error("Shiprocket order error:", error.message);
     res.status(500).send("Shiprocket order failed");
   }
 });
 
 
-cron.schedule('32 15 * * 0', async () => {
-  console.log("⏰ Saturday Cron: Assign AWB");
+cron.schedule('0 00 2 * * 0', async () => {
+  console.log("⏰ Sunday Cron: Assign AWB");
 
   if (!fs.existsSync(JSON_FILE)) return;
 
@@ -193,6 +231,8 @@ cron.schedule('32 15 * * 0', async () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Authorization": shiprocketToken
         },
         body: JSON.stringify({
@@ -219,6 +259,33 @@ cron.schedule('32 15 * * 0', async () => {
 
   fs.writeFileSync(JSON_FILE, JSON.stringify(remainingOrders, null, 2));
 });
+
+const https = require('https');
+
+app.get('/my-ip', (req, res) => {
+  https.get('https://api.ipify.org?format=json', (response) => {
+    let data = '';
+
+    response.on('data', (chunk) => {
+      data += chunk;
+    });
+
+    response.on('end', () => {
+      try {
+        const json = JSON.parse(data);
+        console.log("📡 Server Public IP:", json.ip);
+        res.json({ ip: json.ip });
+      } catch (err) {
+        console.error("Error parsing IP response:", err.message);
+        res.status(500).send("Failed to parse IP");
+      }
+    });
+  }).on("error", (err) => {
+    console.error("Error fetching IP:", err.message);
+    res.status(500).send("Failed to get IP");
+  });
+});
+
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
